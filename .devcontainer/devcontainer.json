@@ -1,0 +1,43 @@
+{
+  "name": "Stiebel Eltron Heat Pump API (dev)",
+  "build": {
+    "context": "..",
+    "dockerfile": "../Dockerfile",
+    // Same "base" stage (Python version, OS packages, non-root user) as the
+    // production "runtime" stage in docker-compose.yml - only the "dev" stage
+    // on top adds test/lint tooling, so the dev environment stays close to
+    // what actually ships.
+    "target": "dev"
+  },
+  "workspaceFolder": "/app",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind,consistency=cached",
+  "remoteUser": "appuser",
+
+  // The image was built with the source tree as it was at build time; once
+  // the live workspace is bind-mounted over /app, re-install in editable mode
+  // so local edits take effect immediately without rebuilding the image.
+  "postCreateCommand": "pip install -e '.[dev]'",
+
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": { "label": "Heat Pump API", "onAutoForward": "notify" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/venv/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": ["tests"]
+      }
+    }
+  }
+
+  // To reach a real USB heat pump from inside the devcontainer, add e.g.:
+  // "runArgs": ["--device=/dev/ttyUSB0"]
+}

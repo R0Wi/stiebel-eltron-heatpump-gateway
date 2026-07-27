@@ -1,0 +1,24 @@
+# Example application configuration.
+# Copy to app.yaml and adjust, then run:
+#   stiebel-heatpump-api --config config/app.yaml
+# Any field can also be set via environment variable, e.g. STIEBEL_TRANSPORT=serial.
+
+# Path to the channel/protocol definition for your heat pump firmware.
+# The binding's XML files are shipped under device_configs/. A native YAML
+# format is supported as well (see config/device.example.yaml).
+device_config: device_configs/LWZ_THZ504_7_59.xml
+
+# "simulator" runs a fake heat pump in-process (no hardware needed).
+# Switch to "serial" to talk to a real device.
+transport: simulator
+
+# Only used when transport: serial.
+# baud_rate must match the firmware: 9600 for the 2.06/2.36/4.19 definitions,
+# 115200 for 5.09/5.39/7.39/7.59/7.62 (these are the binding's own thing-type
+# defaults). The value below matches the device_config selected above.
+port: /dev/ttyUSB0
+baud_rate: 115200
+waiting_time_ms: 1200
+
+title: "Stiebel Eltron Heat Pump API"
+connect_on_startup: true

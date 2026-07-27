@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stiebel-heatpump-api"
+version = "1.0.0"
+description = "Generic, configuration-driven REST API for Stiebel Eltron / Tecalor LWZ/THZ heat pumps over USB serial."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "EPL-2.0" }
+authors = [{ name = "Robin Windey" }]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.5"]
+
+[project.scripts]
+stiebel-heatpump-api = "stiebel_heatpump.main:main"
+
+[tool.setuptools.packages.find]
+include = ["stiebel_heatpump*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+# The `# noqa: BLE001` / `# noqa: SLF001` markers in the sources assume ruff.
+select = ["E", "F", "W", "I", "B", "SLF", "BLE"]
+ignore = [
+    "E501",   # long lines only occur in docstrings/comments
+    "B008",   # FastAPI's Depends()/Query()/Body() in defaults is the intended idiom
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SLF"]

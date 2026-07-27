@@ -1,0 +1,45 @@
+services:
+  heatpump-api:
+    build:
+      context: .
+      target: runtime
+    image: stiebel-heatpump-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      # All application settings are STIEBEL_<FIELD_NAME_UPPER_SNAKE_CASE>
+      # (see stiebel_heatpump/settings.py). No YAML config file is used here -
+      # everything is passed as env vars, which is usually the simpler choice
+      # in a container. Env vars always win if you *do* also mount a YAML
+      # file via STIEBEL_APP_CONFIG.
+      STIEBEL_DEVICE_CONFIG: device_configs/LWZ_THZ504_7_59.xml
+      STIEBEL_TRANSPORT: simulator
+      STIEBEL_TITLE: "Stiebel Eltron Heat Pump API"
+
+      # --- Talking to a real device instead -------------------------------
+      # STIEBEL_TRANSPORT: serial
+      # STIEBEL_PORT: /dev/ttyUSB0
+      # Must match the firmware: 9600 for the 2.06/2.36/4.19 definitions,
+      # 115200 for 5.09/5.39/7.39/7.59/7.62. The default is 9600, so the
+      # THZ504 7.59 config selected above needs it set explicitly.
+      # STIEBEL_BAUD_RATE: "115200"
+      # STIEBEL_WAITING_TIME_MS: "1200"
+    # Uncomment to pass a real USB-serial device through to the container
+    # (Linux hosts only; on Docker Desktop for Mac/Windows use usbipd or a
+    # VM-level passthrough instead):
+    # devices:
+    #   - "/dev/ttyUSB0:/dev/ttyUSB0"
+
+    # Override the device/app config without rebuilding the image:
+    # volumes:
+    #   - ./device_configs:/app/device_configs:ro
+    #   - ./config:/app/config:ro
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    restart: unless-stopped
