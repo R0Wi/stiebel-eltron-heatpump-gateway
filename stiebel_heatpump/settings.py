@@ -57,7 +57,11 @@ class AppSettings(BaseSettings):
     )
     port: str = Field("/dev/ttyUSB0", description="Serial device path (serial transport).")
     baud_rate: int = Field(115200, description="Serial baud rate.")
-    waiting_time_ms: int = Field(500, description="Delay between serial requests in ms.")
+    waiting_time_ms: int = Field(
+        1200,
+        ge=0,
+        description="Minimum pause between two serial conversations in ms (the binding's default).",
+    )
 
     # Background polling (see service.py). Declared here so tests can switch it off.
     poll_enabled: bool = Field(True, description="Poll the pump in the background and serve reads from cache.")

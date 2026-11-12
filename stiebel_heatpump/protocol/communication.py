@@ -32,6 +32,8 @@ class CommunicationService:
     def __init__(self, connector: Connector, waiting_time_ms: int = 1200) -> None:
         self._connector = connector
         self._waiting_time = waiting_time_ms / 1000.0
+        # Monotonic end of the previous bus conversation (None = bus idle).
+        self._last_exchange_end: Optional[float] = None
 
     def connect(self) -> None:
         self._connector.connect()
@@ -81,7 +83,7 @@ class CommunicationService:
         for attempt in range(1, MAX_TRIES + 1):
             try:
                 self._ensure_connected()
-                response = self._connector.get_data(parser.create_request_message(request_bytes))
+                response = self._exchange(self._connector.get_data, parser.create_request_message(request_bytes))
                 if verify_checksum:
                     parser.verify_header(response)
                 else:
@@ -98,12 +100,10 @@ class CommunicationService:
         )
 
     def read_requests(self, requests: list[Request]) -> dict[str, object]:
-        """Read a list of requests, pausing ``waiting_time`` between them."""
+        """Read a list of requests; pacing between them is done by the bus gate."""
         data: dict[str, object] = {}
-        for index, request in enumerate(requests):
+        for request in requests:
             data.update(self.read_request(request))
-            if len(requests) > 1 and index < len(requests) - 1:
-                time.sleep(self._waiting_time)
         return data
 
     # -- writing -------------------------------------------------------------
@@ -138,12 +138,11 @@ class CommunicationService:
         for value, record in items:
             parser.compose_record(value, update, record)
 
-        time.sleep(self._waiting_time)
         # Escape the composed frame before sending, exactly like the read path
         # (create_request_message) and FHEM's THZ_encodecommand -- otherwise a
         # 0x10 or 0x2B byte in the payload corrupts the frame on the wire.
         try:
-            set_response = self._connector.set_data(parser.add_duplicated_bytes(bytes(update)))
+            set_response = self._exchange(self._connector.set_data, parser.add_duplicated_bytes(bytes(update)))
         except parser.ProtocolError:
             # Transport broke mid-write. Not retried (we cannot know whether the
             # device applied it); reset so the next request starts clean.
@@ -240,7 +239,6 @@ class CommunicationService:
             if record is None:
                 continue
             written.update(self._write_values([(values[field], record)]))
-            time.sleep(self._waiting_time)
         return written
 
     def _set_time_via_frame(
@@ -256,12 +254,26 @@ class CommunicationService:
                 parser.compose_record(values[record.channel_id], update, record)
                 written[record.channel_id] = values[record.channel_id]
 
-        time.sleep(self._waiting_time)
-        self._connector.set_data(parser.add_duplicated_bytes(bytes(update)))
-        time.sleep(self._waiting_time)
+        self._exchange(self._connector.set_data, parser.add_duplicated_bytes(bytes(update)))
         return written
 
     # -- helpers -------------------------------------------------------------
+
+    def _exchange(self, operation, message: bytes) -> bytes:
+        """Run one handshake, first waiting out ``waiting_time`` since the last one.
+
+        The pump's CPU needs a pause between conversations; the binding enforces
+        it between *all* requests and commands, so it is enforced here on the bus
+        rather than only inside a single call. An idle bus is not delayed.
+        """
+        if self._last_exchange_end is not None:
+            remaining = self._last_exchange_end + self._waiting_time - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+        try:
+            return operation(message)
+        finally:
+            self._last_exchange_end = time.monotonic()
 
     @staticmethod
     def _check_frame_shape(response: bytes) -> None:
