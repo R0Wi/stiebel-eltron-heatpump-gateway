@@ -140,6 +140,14 @@ hardware needed). To talk to a real device instead, set `STIEBEL_TRANSPORT=seria
 and uncomment the `devices:` passthrough for your USB-serial adapter (Linux
 hosts; see the comments in `docker-compose.yml`).
 
+The container runs as a non-root user that is a member of the `dialout` group
+(gid 20), the usual owner of `/dev/ttyUSB*`. If your host's group has a different
+gid, add it with `group_add:` using the **numeric** gid (`stat -c %g
+/dev/ttyUSB0`) and prefer the stable `/dev/serial/by-id/...` path for the
+device. If the device cannot be opened the service stays up and answers `503`
+with a "permission denied" hint; it connects by itself as soon as the problem is
+fixed — no restart needed.
+
 #### Dev container
 
 Open the `stiebel-eltron-rest` folder in VS Code and "Reopen in Container".
@@ -249,9 +257,9 @@ matches the `device_config` you picked:
 | `LWZ_THZ303_5_09`, `LWZ_THZ303_5_39`, `LWZ_THZ303_7_39` | `115200` |
 | `LWZ_THZ504_7_59`, `Tecalor_THZ55_7_62` | `115200` |
 
-Note that `baud_rate` defaults to `9600` (the value for the older 2.x/4.x
-firmware), so for a 504 you have to set it explicitly. If reads time out or come
-back as garbage, the baud rate is the first thing to check.
+`baud_rate` defaults to `115200`, which is right for the 5.x/7.x firmware; the
+2.x/4.19 definitions need `9600` set explicitly. If reads time out or come back
+as garbage, the baud rate is the first thing to check.
 
 ### 3. Point the service at it
 
@@ -284,12 +292,13 @@ correct and every channel in the definition is reachable over HTTP.
 | Method & path | Description |
 |---------------|-------------|
 | `GET /` | service / configuration summary |
-| `GET /health` | liveness probe |
+| `GET /health` | liveness probe (always `200`); also reports the serial `link` state and last error |
+| `GET /health/ready` | readiness probe: `200` while the heat pump is reachable, `503` otherwise |
 | `GET /version` | heat pump firmware version |
 | `GET /channels` | list all channels (filter by `data_type`, `writable`) |
-| `GET /channels/{channel_id}` | read one value |
+| `GET /channels/{channel_id}` | read one value (`?fresh=true` reads from the pump now) |
 | `PUT /channels/{channel_id}` | write a settings value (`{"value": …}`) |
-| `GET /values?ids=a,b` | read several channels at once (404 if any id is unknown) |
+| `GET /values?ids=a,b` | read several channels at once (404 if any id is unknown; also takes `fresh`) |
 | `GET /values?data_type=Sensor` | read all sensor (or status/settings) values |
 | `GET /values` | read all Sensor **and** Status values (the default) |
 | `POST /actions/set-time` | sync the heat pump clock to system time |
@@ -305,18 +314,45 @@ dead serial link from a device that refused a setting:
 | `404` | unknown channel id |
 | `409` | the channel exists but is not writable (only `Settings` channels are) |
 | `502` | the write reached the device and the device refused it — **the value on the device is unchanged** |
-| `503` | the heat pump could not be reached at all (no response, bad framing, retries exhausted) |
+| `503` | the heat pump could not be reached at all (no response, bad framing, serial port missing/unplugged, retries exhausted), or its cached values have gone stale |
 
 A `200` on `PUT` therefore means the device acknowledged the write; the
 response body carries the value read back out of the confirmed frame.
 
-> **One serial link, one conversation at a time.** Every request is serialised
-> behind a single lock, and each round trip costs `waiting_time_ms` (500 ms by
-> default). Reading a whole category is correspondingly slow — `GET
-> /values?data_type=Settings` is 29 round trips ≈ 35 s on a THZ 504 — and holds
-> the lock for the duration. Prefer one `GET /values?ids=…` over many
-> single-channel requests, and keep poll intervals well above the time a full
-> sweep takes.
+### Polling, caching and the serial line
+
+The heat pump allows one conversation at a time and needs a pause after each
+(`waiting_time_ms`, default 1200 — the binding's default). A full sweep of the
+Settings frames on a THZ 504 is 29 round trips ≈ 35 s, which no HTTP client
+should wait for. So, like the binding's refresh job, the service **polls in the
+background and answers reads from a cache**:
+
+* Sensor/Status frames are re-read every `refresh_s` (default 60 s, minimum 10);
+  Settings frames every `settings_refresh_s` (default 900 s) — they only change
+  when someone changes them.
+* Every value carries `updated_at` (UTC), the time it was read from the pump.
+* `?fresh=true` bypasses the cache and does a live, paced read (slow; use it
+  sparingly — e.g. for the display clock, which lives in a `Settings` frame and is
+  therefore refreshed only every `settings_refresh_s`).
+* A write is confirmed by the pump, shown in the cache immediately, and its frame
+  is re-read right after.
+* **Writes go first**: a write waits for at most the one frame in flight, never for
+  a whole sweep. All access is otherwise first-come-first-served.
+* If polling of a frame keeps failing, the last values are still served for
+  `stale_after_s` (default 300 s) and refused with `503` after that, so a dead link
+  is never mistaken for current data.
+* Right after start-up the cache is filled frame by frame (a THZ 504 needs ≈ 45 s
+  for everything); a value that has not been polled yet is read on demand.
+* `poll_enabled: false` turns all of this off: every read is a live round trip.
+
+Any two conversations — including ones from separate HTTP requests — are at least
+`waiting_time_ms` apart; an idle line is not delayed. The serial link recovers
+on its own: an adapter that was absent at start-up or is unplugged and plugged
+back in causes `503`s for as long as it is gone, then works again without a restart.
+
+For openHAB's HTTP binding this means: use a `refresh` no shorter than `refresh_s`,
+and give the Thing a generous `timeout` (e.g. `10000` ms) — a `PUT` is still two
+paced round trips (read, then set).
 
 The published **OpenAPI depends on the loaded config**: the `{channel_id}` path
 parameter is an `enum` of your device's channels, a `HeatPumpValues` schema

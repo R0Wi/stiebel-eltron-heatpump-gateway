@@ -18,7 +18,15 @@ transport: simulator
 # defaults). The value below matches the device_config selected above.
 port: /dev/ttyUSB0
 baud_rate: 115200
+# Minimum pause between two serial conversations (also across separate API calls).
 waiting_time_ms: 1200
+
+# Background polling: reads are answered from a cache kept fresh by a poller.
+# Set poll_enabled: false to make every read a live (slow) serial round trip.
+poll_enabled: true
+refresh_s: 60            # Sensor/Status frames
+settings_refresh_s: 900  # Settings frames (rarely change)
+stale_after_s: 300       # refuse (503) cached values whose polling keeps failing
 
 title: "Stiebel Eltron Heat Pump API"
 connect_on_startup: true

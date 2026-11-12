@@ -24,8 +24,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Non-root user shared by dev and runtime stages (fixed uid/gid so bind
 # mounts from the host keep sane permissions in the devcontainer).
+# `dialout` (gid 20 in Debian) owns /dev/ttyUSB*/ttyS* on most Linux hosts; being a
+# member lets the service open the serial adapter. If the host uses another gid,
+# docker-compose.yml's `group_add` covers it.
 RUN groupadd --gid 1000 appuser \
-    && useradd --uid 1000 --gid appuser --create-home --shell /bin/bash appuser
+    && useradd --uid 1000 --gid appuser --groups dialout --create-home --shell /bin/bash appuser
 
 WORKDIR /app
 
