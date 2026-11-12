@@ -8,6 +8,7 @@ layer can describe every channel generically, purely from configuration.
 from __future__ import annotations
 
 import enum
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -90,3 +91,6 @@ class ChannelValue(BaseModel):
     unit: Optional[str] = None
     data_type: DataType
     writable: bool
+    updated_at: Optional[datetime] = Field(
+        None, description="When the value was last read from the heat pump (UTC)."
+    )

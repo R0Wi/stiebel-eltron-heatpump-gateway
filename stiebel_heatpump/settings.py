@@ -63,8 +63,25 @@ class AppSettings(BaseSettings):
         description="Minimum pause between two serial conversations in ms (the binding's default).",
     )
 
-    # Background polling (see service.py). Declared here so tests can switch it off.
-    poll_enabled: bool = Field(True, description="Poll the pump in the background and serve reads from cache.")
+    # Background polling (see service.py / poller.py).
+    poll_enabled: bool = Field(
+        True,
+        description=(
+            "Poll the pump in the background and answer reads from the cache. "
+            "When false every read is a live serial round trip."
+        ),
+    )
+    refresh_s: int = Field(
+        60, ge=10, description="Poll interval for Sensor/Status frames in seconds (binding default: 60)."
+    )
+    settings_refresh_s: int = Field(
+        900, ge=10, description="Poll interval for Settings frames in seconds (they rarely change)."
+    )
+    stale_after_s: int = Field(
+        300,
+        ge=1,
+        description="A cached value whose latest poll failed is refused (503) once it is this old.",
+    )
 
     # API metadata.
     title: str = Field("Stiebel Eltron Heat Pump API", description="OpenAPI title.")

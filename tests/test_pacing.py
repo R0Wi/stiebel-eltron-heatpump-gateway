@@ -4,28 +4,14 @@ including ones triggered by separate API calls -- not only inside one call."""
 import time
 
 from fastapi.testclient import TestClient
+from helpers import RecordingTransport
 
 from stiebel_heatpump.api import build_app
-from stiebel_heatpump.protocol import parser
-from stiebel_heatpump.protocol.transport import SimulatorTransport
 from stiebel_heatpump.service import HeatPumpService
 from stiebel_heatpump.settings import AppSettings
 from stiebel_heatpump.simulator import HeatPumpSimulator
 
 WAIT = 0.05
-
-
-class RecordingTransport(SimulatorTransport):
-    """Notes the time every conversation starts (the 0x02 start byte)."""
-
-    def __init__(self, simulator) -> None:
-        super().__init__(simulator)
-        self.starts: list[float] = []
-
-    def write(self, data: bytes) -> None:
-        if data == bytes([parser.START_COMMUNICATION]):
-            self.starts.append(time.monotonic())
-        super().write(data)
 
 
 def make_service(config):

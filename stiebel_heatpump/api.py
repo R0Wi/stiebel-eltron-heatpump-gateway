@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional, Union
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
@@ -65,6 +66,14 @@ class ValueResponse(BaseModel):
     unit: Optional[str] = None
     data_type: DataType
     writable: bool
+    updated_at: Optional[datetime] = None
+
+
+_FRESH_DESCRIPTION = (
+    "Bypass the polling cache and read from the heat pump now (slow: one paced serial "
+    "round trip per request frame). Without it values come from the background poller; "
+    "`updated_at` says how old they are. Has no effect when polling is disabled."
+)
 
 
 # -- app factory -------------------------------------------------------------
@@ -94,6 +103,7 @@ def build_app(
                 svc.connect()
             except Exception:  # noqa: BLE001 - stay up even if the device is absent
                 logger.exception("Could not connect to heat pump on startup")
+        svc.start_polling()
         try:
             yield
         finally:
@@ -207,26 +217,31 @@ def _register_routes(app: FastAPI) -> None:
                 "when neither is given, Sensor and Status channels are read."
             ),
         ),
+        fresh: bool = Query(False, description=_FRESH_DESCRIPTION),
         service: HeatPumpService = Depends(get_service),
     ) -> list[ValueResponse]:
         if ids:
             channel_ids = [part.strip() for part in ids.split(",") if part.strip()]
             try:
-                values = service.read_channels(channel_ids)
+                values = service.read_channels(channel_ids, fresh)
             except ChannelNotFound as exc:
                 raise HTTPException(
                     status_code=404, detail=f"Unknown channel(s): {exc.args[0]}"
                 ) from exc
         else:
             types = {data_type} if data_type else None
-            values = service.read_all(types)
+            values = service.read_all(types, fresh)
         return [ValueResponse(**v.model_dump()) for v in values]
 
     @app.get("/channels/{channel_id}", tags=["values"], summary="Read a single channel value",
              response_model=ValueResponse)
-    def read_channel(channel_id: str, service: HeatPumpService = Depends(get_service)) -> ValueResponse:
+    def read_channel(
+        channel_id: str,
+        fresh: bool = Query(False, description=_FRESH_DESCRIPTION),
+        service: HeatPumpService = Depends(get_service),
+    ) -> ValueResponse:
         try:
-            value = service.read_channel(channel_id)
+            value = service.read_channel(channel_id, fresh)
         except ChannelNotFound as exc:
             raise HTTPException(status_code=404, detail=f"Unknown channel '{channel_id}'") from exc
         return ValueResponse(**value.model_dump())
