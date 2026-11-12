@@ -161,8 +161,21 @@ def _register_routes(app: FastAPI) -> None:
         }
 
     @app.get("/health", tags=["meta"], summary="Liveness probe")
-    def health() -> dict:
-        return {"status": "ok"}
+    def health(request: Request) -> dict:
+        """The process is up (always 200). ``link`` tells whether the heat pump
+        is reachable; use ``/health/ready`` for a probe that fails with it."""
+        service: Optional[HeatPumpService] = getattr(request.app.state, "service", None)
+        body: dict = {"status": "ok"}
+        if service is not None:
+            body.update(_jsonable_status(service.link_status()))
+        return body
+
+    @app.get("/health/ready", tags=["meta"], summary="Readiness probe (heat pump reachable)")
+    def ready(request: Request) -> JSONResponse:
+        service: Optional[HeatPumpService] = getattr(request.app.state, "service", None)
+        status = _jsonable_status(service.link_status()) if service is not None else {"link": "unknown"}
+        ok = status["link"] == "up"
+        return JSONResponse(status_code=200 if ok else 503, content={"status": "ok" if ok else "unavailable", **status})
 
     @app.get("/version", tags=["meta"], summary="Heat pump firmware version")
     def version(service: HeatPumpService = Depends(get_service)) -> dict:
@@ -240,6 +253,10 @@ def _register_routes(app: FastAPI) -> None:
     @app.post("/actions/set-time", tags=["actions"], summary="Sync heat pump clock to system time")
     def set_time(service: HeatPumpService = Depends(get_service)) -> dict:
         return service.set_time()
+
+
+def _jsonable_status(status: dict) -> dict:
+    return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in status.items()}
 
 
 # -- dynamic OpenAPI ---------------------------------------------------------

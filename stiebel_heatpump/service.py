@@ -8,16 +8,20 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Iterable, Optional
+from datetime import datetime, timezone
+from typing import Callable, Iterable, Optional, TypeVar
 
 from .config_loader import HeatPumpConfig, Request
 from .models import ChannelDefinition, ChannelValue, DataType, ValueKind
 from .protocol.communication import CommunicationService
 from .protocol.connector import Connector
+from .protocol.parser import ProtocolError, WriteNotConfirmed
 from .protocol.transport import SerialTransport, SimulatorTransport, Transport
 from .settings import AppSettings
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # Clock field -> channel id of the individual writable register used to set the
 # heat pump clock on firmware 4.39/5.39/7.x (see the device configs and FHEM's
@@ -47,7 +51,10 @@ class HeatPumpService:
         self._config = config
         self._communication = CommunicationService(Connector(transport), waiting_time_ms)
         self._lock = threading.Lock()
-        self._connected = False
+        self._status_lock = threading.Lock()
+        self._last_success: Optional[datetime] = None
+        self._last_error: Optional[str] = None
+        self._last_error_at: Optional[datetime] = None
 
     # -- construction --------------------------------------------------------
 
@@ -64,16 +71,61 @@ class HeatPumpService:
     # -- lifecycle -----------------------------------------------------------
 
     def connect(self) -> None:
+        """Try to open the link now. Best effort: if the device is absent the
+        service stays up and every later request retries the connection."""
         with self._lock:
-            if not self._connected:
+            try:
                 self._communication.connect()
-                self._connected = True
+            except ProtocolError as exc:
+                self._note_error(exc)
+                logger.warning("Could not open the heat pump link yet (will retry on demand): %s", exc)
 
     def close(self) -> None:
         with self._lock:
-            if self._connected:
-                self._communication.close()
-                self._connected = False
+            self._communication.close()
+
+    # -- link health ---------------------------------------------------------
+
+    def _note_success(self) -> None:
+        with self._status_lock:
+            self._last_success = datetime.now(timezone.utc)
+
+    def _note_error(self, exc: Exception) -> None:
+        with self._status_lock:
+            self._last_error = str(exc)
+            self._last_error_at = datetime.now(timezone.utc)
+
+    def _io(self, operation: Callable[..., T], *args: object) -> T:
+        """Run one serial conversation and record whether the link worked."""
+        try:
+            result = operation(*args)
+        except WriteNotConfirmed:
+            self._note_success()  # the device answered; it just refused the SET
+            raise
+        except ProtocolError as exc:
+            self._note_error(exc)
+            raise
+        self._note_success()
+        return result
+
+    def link_status(self) -> dict[str, object]:
+        """``up`` once the latest conversation succeeded, ``down`` once the latest
+        failed, ``unknown`` before the first one."""
+        with self._status_lock:
+            if self._last_success is None and self._last_error_at is None:
+                state = "unknown"
+            elif self._last_error_at is None or (
+                self._last_success is not None and self._last_success >= self._last_error_at
+            ):
+                state = "up"
+            else:
+                state = "down"
+            return {
+                "link": state,
+                "last_success": self._last_success,
+                "last_error": self._last_error,
+                "last_error_at": self._last_error_at,
+            }
 
     @property
     def config(self) -> HeatPumpConfig:
@@ -86,13 +138,13 @@ class HeatPumpService:
         if request is None:
             return "<UNKNOWN_VERSION>"
         with self._lock:
-            return self._communication.get_version(request)
+            return self._io(self._communication.get_version, request)
 
     def read_channel(self, channel_id: str) -> ChannelValue:
         record = self._require_channel(channel_id)
         request = self._config.request_for_channel(channel_id)
         with self._lock:
-            data = self._communication.read_request(request)
+            data = self._io(self._communication.read_request, request)
         if channel_id not in data:
             raise ChannelNotFound(channel_id)
         return self._to_channel_value(record, data[channel_id])
@@ -111,7 +163,7 @@ class HeatPumpService:
         wanted_set = set(wanted)
         results: list[ChannelValue] = []
         with self._lock:
-            data = self._communication.read_requests(requests)
+            data = self._io(self._communication.read_requests, requests)
         for channel_id, value in data.items():
             if channel_id in wanted_set:
                 record = self._config.channel(channel_id)
@@ -127,7 +179,7 @@ class HeatPumpService:
             if any(record.data_type in types for record in request.records)
         ]
         with self._lock:
-            data = self._communication.read_requests(requests)
+            data = self._io(self._communication.read_requests, requests)
         results: list[ChannelValue] = []
         for channel_id, value in data.items():
             record = self._config.channel(channel_id)
@@ -143,7 +195,7 @@ class HeatPumpService:
             raise ChannelNotWritable(channel_id)
         coerced = self._coerce(record, value)
         with self._lock:
-            data = self._communication.write_data(coerced, record)
+            data = self._io(self._communication.write_data, coerced, record)
         result = data.get(channel_id, coerced)
         return self._to_channel_value(record, result)
 
@@ -155,7 +207,7 @@ class HeatPumpService:
             if record is not None:
                 clock_records[field] = record
         with self._lock:
-            return self._communication.set_time(request, clock_records)
+            return self._io(self._communication.set_time, request, clock_records)
 
     # -- helpers -------------------------------------------------------------
 

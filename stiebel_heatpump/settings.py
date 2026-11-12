@@ -59,6 +59,9 @@ class AppSettings(BaseSettings):
     baud_rate: int = Field(115200, description="Serial baud rate.")
     waiting_time_ms: int = Field(500, description="Delay between serial requests in ms.")
 
+    # Background polling (see service.py). Declared here so tests can switch it off.
+    poll_enabled: bool = Field(True, description="Poll the pump in the background and serve reads from cache.")
+
     # API metadata.
     title: str = Field("Stiebel Eltron Heat Pump API", description="OpenAPI title.")
     connect_on_startup: bool = Field(True, description="Open the transport when the app starts.")
