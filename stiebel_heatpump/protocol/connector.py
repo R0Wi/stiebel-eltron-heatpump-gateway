@@ -29,12 +29,26 @@ class Connector:
 
     def __init__(self, transport: Transport) -> None:
         self._transport = transport
+        self._connected = False
+
+    @property
+    def connected(self) -> bool:
+        """Whether :meth:`connect` succeeded and no :meth:`disconnect` followed."""
+        return self._connected
 
     def connect(self) -> None:
+        self._connected = False
         self._transport.open()
+        self._connected = True
 
     def disconnect(self) -> None:
-        self._transport.close()
+        """Close the transport. Never raises: it is used on the recovery path,
+        where the device may already be gone."""
+        self._connected = False
+        try:
+            self._transport.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("Ignoring error while closing transport", exc_info=True)
 
     # -- public read / write -------------------------------------------------
 
@@ -46,6 +60,8 @@ class Connector:
         try:
             self._transport.write(bytes([parser.ESCAPE]))
             return self._receive_data()
+        except parser.ProtocolError:
+            raise  # link failure: let the caller reset the link, don't mask it as "no data"
         except Exception:  # noqa: BLE001
             logger.exception("Could not get data from heat pump!")
             return b""
@@ -56,6 +72,8 @@ class Connector:
             self._start_communication()
             self._establish_request(request_message)
             self._transport.write(bytes([parser.ESCAPE]))
+        except parser.ProtocolError:
+            raise
         except Exception:  # noqa: BLE001
             logger.exception("Could not set data to heat pump!")
             return b""

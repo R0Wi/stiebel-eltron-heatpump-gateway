@@ -26,9 +26,18 @@ services:
       # STIEBEL_WAITING_TIME_MS: "1200"
     # Uncomment to pass a real USB-serial device through to the container
     # (Linux hosts only; on Docker Desktop for Mac/Windows use usbipd or a
-    # VM-level passthrough instead):
+    # VM-level passthrough instead). Prefer the stable /dev/serial/by-id/...
+    # path over ttyUSB0: it survives re-plugging and re-numbering.
     # devices:
     #   - "/dev/ttyUSB0:/dev/ttyUSB0"
+    #
+    # The service runs as a non-root user, which must be allowed to open the
+    # device. The image already adds it to `dialout` (gid 20, the usual owner of
+    # /dev/ttyUSB*). If your host's owning group has another gid, give that
+    # *numeric* gid here (`stat -c %g /dev/ttyUSB0`) -- group names are resolved
+    # inside the container, where they may not match the host's:
+    # group_add:
+    #   - "20"
 
     # Override the device/app config without rebuilding the image:
     # volumes:

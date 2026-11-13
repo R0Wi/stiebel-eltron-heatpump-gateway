@@ -32,6 +32,8 @@ class CommunicationService:
     def __init__(self, connector: Connector, waiting_time_ms: int = 1200) -> None:
         self._connector = connector
         self._waiting_time = waiting_time_ms / 1000.0
+        # Monotonic end of the previous bus conversation (None = bus idle).
+        self._last_exchange_end: Optional[float] = None
 
     def connect(self) -> None:
         self._connector.connect()
@@ -58,44 +60,50 @@ class CommunicationService:
         device and an unknown channel id are different failure modes and are
         surfaced differently by the service/API layers.
         """
+        response = self._read_frame(request.request_bytes)
+        if request.request_bytes2 is None:
+            return parser.parse_records(response, request.records)
+        response2 = self._read_frame(request.request_bytes2)
+        return parser.parse_records(response, request.records, response2)
+
+    def _read_frame(self, request_bytes: bytes, *, verify_checksum: bool = True) -> bytes:
+        """One validated GET round trip, retried with a link reset in between.
+
+        ``verify_checksum=False`` only checks the frame's shape (header, GET
+        byte, known device errors). The read that precedes a write uses it,
+        because the binding never checksummed that read and its captured test
+        vectors (e.g. ``0100960B028700001003``) do not carry valid checksums.
+
+        Connects lazily, so a device that was absent at startup (or vanished
+        and came back) is picked up by the next request. Every failure --
+        including the transport itself breaking -- resets the link and is
+        retried; only when all attempts fail does it raise.
+        """
         last_error: Optional[str] = None
         for attempt in range(1, MAX_TRIES + 1):
             try:
-                response = self._connector.get_data(
-                    parser.create_request_message(request.request_bytes)
-                )
-                if not parser.header_check(response):
-                    raise parser.ProtocolError(
-                        f"invalid or missing response: {parser.bytes_to_hex(response)}"
-                    )
-                if request.request_bytes2 is None:
-                    return parser.parse_records(response, request.records)
-                time.sleep(self._waiting_time)
-                response2 = self._connector.get_data(
-                    parser.create_request_message(request.request_bytes2)
-                )
-                if not parser.header_check(response2):
-                    raise parser.ProtocolError(
-                        f"invalid or missing response2: {parser.bytes_to_hex(response2)}"
-                    )
-                return parser.parse_records(response, request.records, response2)
+                self._ensure_connected()
+                response = self._exchange(self._connector.get_data, parser.create_request_message(request_bytes))
+                if verify_checksum:
+                    parser.verify_header(response)
+                else:
+                    self._check_frame_shape(response)
+                return response
             except parser.ProtocolError as exc:
                 last_error = str(exc)
                 logger.warning("Error reading data for %s: %s (retry %s)",
-                               request.request_byte, exc, attempt)
-                self._restart()
+                               parser.bytes_to_hex(request_bytes), exc, attempt)
+                self._reset_link()
         raise parser.ProtocolError(
-            f"Could not read data for request {request.request_byte} after "
+            f"Could not read data for request {parser.bytes_to_hex(request_bytes)} after "
             f"{MAX_TRIES} attempts: {last_error}"
         )
 
     def read_requests(self, requests: list[Request]) -> dict[str, object]:
-        """Read a list of requests, pausing ``waiting_time`` between them."""
+        """Read a list of requests; pacing between them is done by the bus gate."""
         data: dict[str, object] = {}
-        for index, request in enumerate(requests):
+        for request in requests:
             data.update(self.read_request(request))
-            if len(requests) > 1 and index < len(requests) - 1:
-                time.sleep(self._waiting_time)
         return data
 
     # -- writing -------------------------------------------------------------
@@ -116,32 +124,30 @@ class CommunicationService:
         first_record = items[0][1]
         channel_ids = ";".join(record.channel_id for _, record in items)
 
-        read_request_message = parser.create_request_message(bytes.fromhex(first_record.request_byte))
-        read_response = self._connector.get_data(read_request_message)
+        request_bytes = bytes.fromhex(first_record.request_byte)
+        read_request_message = parser.create_request_message(request_bytes)
+        # Raises (after retries) if the current state cannot be read, so a write
+        # is never attempted -- or reported as done -- blind.
+        read_response = self._read_frame(request_bytes, verify_checksum=False)
 
         if read_request_message == read_response:
             logger.debug("Current value(s) for %s already set.", channel_ids)
             return {}
-        if not read_response:
-            # We could not even read the current state, so no write was
-            # attempted at all. This must not be reported as success with the
-            # caller's requested value substituted in -- raise instead of
-            # returning {}, so the caller can tell "write failed" apart from
-            # "value already matched, nothing to do".
-            raise parser.ProtocolError(
-                f"Could not read current value(s) for {channel_ids} before writing; "
-                "write was not attempted."
-            )
 
         update = bytearray(read_response)
         for value, record in items:
             parser.compose_record(value, update, record)
 
-        time.sleep(self._waiting_time)
         # Escape the composed frame before sending, exactly like the read path
         # (create_request_message) and FHEM's THZ_encodecommand -- otherwise a
         # 0x10 or 0x2B byte in the payload corrupts the frame on the wire.
-        set_response = self._connector.set_data(parser.add_duplicated_bytes(bytes(update)))
+        try:
+            set_response = self._exchange(self._connector.set_data, parser.add_duplicated_bytes(bytes(update)))
+        except parser.ProtocolError:
+            # Transport broke mid-write. Not retried (we cannot know whether the
+            # device applied it); reset so the next request starts clean.
+            self._reset_link()
+            raise
 
         try:
             parser.verify_header(set_response)
@@ -212,11 +218,13 @@ class CommunicationService:
 
         data: dict[str, object] = {}
         if read_request is not None:
-            response = self._connector.get_data(
-                parser.create_request_message(read_request.request_bytes)
-            )
-            if parser.header_check(response):
+            # Best effort: the clock was already written, so failing to read it
+            # back must not turn a successful sync into an error.
+            try:
+                response = self._read_frame(read_request.request_bytes)
                 data = parser.parse_records(response, read_request.records)
+            except parser.ProtocolError:
+                logger.warning("Clock written but could not be read back.")
         data.update(written)
         data["lastUpdate"] = now.strftime("%Y-%m-%d %H:%M:%S")
         return data
@@ -231,19 +239,13 @@ class CommunicationService:
             if record is None:
                 continue
             written.update(self._write_values([(values[field], record)]))
-            time.sleep(self._waiting_time)
         return written
 
     def _set_time_via_frame(
         self, read_request: Request, values: dict[str, object]
     ) -> dict[str, object]:
         """Compose the date/time fields into the FC register (older 2.x firmware)."""
-        response = self._connector.get_data(
-            parser.create_request_message(read_request.request_bytes)
-        )
-        if not parser.header_check(response):
-            logger.warning("Could not read current time from heat pump.")
-            return {}
+        response = self._read_frame(read_request.request_bytes)
 
         update = bytearray(response)
         written: dict[str, object] = {}
@@ -252,15 +254,49 @@ class CommunicationService:
                 parser.compose_record(values[record.channel_id], update, record)
                 written[record.channel_id] = values[record.channel_id]
 
-        time.sleep(self._waiting_time)
-        self._connector.set_data(parser.add_duplicated_bytes(bytes(update)))
-        time.sleep(self._waiting_time)
+        self._exchange(self._connector.set_data, parser.add_duplicated_bytes(bytes(update)))
         return written
 
     # -- helpers -------------------------------------------------------------
 
-    def _restart(self) -> None:
-        logger.debug("Restarting connector")
+    def _exchange(self, operation, message: bytes) -> bytes:
+        """Run one handshake, first waiting out ``waiting_time`` since the last one.
+
+        The pump's CPU needs a pause between conversations; the binding enforces
+        it between *all* requests and commands, so it is enforced here on the bus
+        rather than only inside a single call. An idle bus is not delayed.
+        """
+        if self._last_exchange_end is not None:
+            remaining = self._last_exchange_end + self._waiting_time - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+        try:
+            return operation(message)
+        finally:
+            self._last_exchange_end = time.monotonic()
+
+    @staticmethod
+    def _check_frame_shape(response: bytes) -> None:
+        if len(response) < 4:
+            raise parser.ProtocolError(f"invalid response length: {parser.bytes_to_hex(response)}")
+        if response[0] != parser.HEADER_START or response[1] != parser.GET:
+            parser.check_known_errors(response)
+            raise parser.ProtocolError(f"unexpected response: {parser.bytes_to_hex(response)}")
+
+    def _ensure_connected(self) -> None:
+        if not self._connector.connected:
+            self._connector.connect()
+
+    def _reset_link(self) -> None:
+        """Drop the connection; the next request reconnects lazily.
+
+        Deliberately does *not* reconnect here: this runs inside ``except``
+        blocks, and a reconnect that fails (port still missing) must not escape
+        as an unhandled error -- it is retried, and reported as 503, by the
+        request that follows.
+        """
+        was_connected = self._connector.connected
+        logger.debug("Resetting connector")
         self._connector.disconnect()
-        time.sleep(0.5)
-        self._connector.connect()
+        if was_connected:
+            time.sleep(0.5)  # give the adapter/pump a moment before re-opening
